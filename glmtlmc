@@ -526,6 +526,27 @@ def preserved_vr_glfix(content):
     return None
 
 
+# glmtlmc owns these three: they name the current stack and go stale on a move.
+GLMTLMC_LIBNAME_PREFIXES = ("-Dorg.lwjgl.egl.libname=",
+                            "-Dorg.lwjgl.opengl.libname=",
+                            "-Dorg.lwjgl.glfw.libname=")
+
+
+def user_jvm_flags(content):
+    """The user's own JvmArgs tokens, so a patch merges instead of wiping them.
+
+    Only glmtlmc's libname flags (stale after a move) and MoltenVR's own flags
+    (handled separately) are left out; everything else stays verbatim.
+    """
+    flags = []
+    for token in jvm_arg_tokens(content):
+        if token.startswith(GLMTLMC_LIBNAME_PREFIXES + MOLTENVR_JVM_FLAGS):
+            continue
+        if token not in flags:
+            flags.append(token)
+    return flags
+
+
 def stack_search_dir(stack):
     """Where DYLD_LIBRARY_PATH points: the stack's lib/, or vr-lib in VR mode."""
     return stack.get("search_dir") or stack["prefix"] + "/lib"
@@ -535,8 +556,9 @@ def build_patch_values(prefix, glfw_path, icd_path, search_dir=None, preserved_f
     """The four keys glmtlmc owns.
 
     search_dir defaults to the stack's lib/. preserved_flags are MoltenVR's own
-    JvmArgs flags and injected the extra dylibs to add after libgl_interpose.dylib,
-    both so a re-patch merges instead of overwriting.
+    JvmArgs flags plus the user's own tokens, and injected the extra dylibs
+    to add after libgl_interpose.dylib, both so a re-patch merges instead of
+    overwriting.
     """
     search_dir = prefix + "/lib" if search_dir is None else search_dir
     jvm_flags = [
@@ -974,6 +996,20 @@ def verify_instance_version(line, instance_dir):
                          + ", expected " + MINECRAFT_VERSION)
 
 
+def refuse_duplicate_mods(line, instance_dir):
+    """Refuse when two jars of one mod sit in mods/: Fabric loads neither and
+    crashes on startup, and the newest-jar reporting below would hide it."""
+    dups = []
+    for mod_name in ("voxy",):
+        jars = find_mod_jars(os.path.join(instance_dir, "minecraft", "mods"), mod_name)
+        if len(jars) > 1:
+            dups.append(mod_name + ": " + ", ".join(name for name, _ in jars))
+    if dups:
+        raise PhaseError("duplicate mod jars would crash the game on startup -- "
+                         "keep one and remove the other: " + "; ".join(dups))
+    line.report("checked", "no duplicate mod jars")
+
+
 def probe_report(line, script_dir, stack):
     prefix = resolve_mesa_prefix(script_dir)
     egl_path = os.path.join(prefix, "lib", "libEGL.dylib")
@@ -1160,7 +1196,7 @@ def back_up_config(line, instance_dir, content):
 def configure_custom_arguments(line, instance_dir, stack):
     cfg_path = os.path.join(instance_dir, "instance.cfg")
     content = read_file_bytes(cfg_path)
-    preserved = moltenvr_jvm_flags(content)
+    preserved = moltenvr_jvm_flags(content) + user_jvm_flags(content)
     shim_dir = stack.get("shim_dir")
     if shim_dir is not None:
         preserved = with_moltenvr_flags(preserved, shim_dir)
@@ -1449,6 +1485,7 @@ def patch_phases(instance_dir, script_dir):
     return [
         ("Verifying hardware compatibility", lambda line: verify_hardware(line)),
         ("Verifying instance version", lambda line: verify_instance_version(line, instance_dir)),
+        ("Checking for duplicate mods", lambda line: refuse_duplicate_mods(line, instance_dir)),
         ("Getting report from Translation Layer", lambda line: probe_report(line, script_dir, stack)),
         ("Configuring MESA", lambda line: configure_mesa(line, stack)),
         ("Configuring KosmikKrisp", lambda line: configure_kosmickrisp(line, stack)),
@@ -1465,6 +1502,7 @@ def patch_vr_phases(instance_dir, script_dir):
     return [
         ("Verifying hardware compatibility", lambda line: verify_hardware(line)),
         ("Verifying instance version", lambda line: verify_instance_version(line, instance_dir)),
+        ("Checking for duplicate mods", lambda line: refuse_duplicate_mods(line, instance_dir)),
         ("Getting report from Translation Layer", lambda line: probe_report(line, script_dir, stack)),
         ("Configuring MESA", lambda line: configure_mesa(line, stack)),
         ("Configuring KosmikKrisp", lambda line: configure_kosmickrisp(line, stack)),

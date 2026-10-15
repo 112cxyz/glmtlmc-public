@@ -320,10 +320,76 @@ VRGLFIX_FORWARD_VOID(glGenTextures, (GLsizei n, GLuint *textures),
 VRGLFIX_FORWARD_RET(GLenum, glGetError, (void), (), (GLenum)0);
 VRGLFIX_FORWARD_VOID(glGetIntegerv, (GLenum pname, GLint *params),
                      (pname, params));
-VRGLFIX_FORWARD_VOID(glGetTexImage,
-                     (GLenum target, GLint level, GLenum format, GLenum type,
-                      GLvoid *pixels),
-                     (target, level, format, type, pixels));
+/* Pack-sanitized GetTexImage: the shim sizes its PBO tight (w*h*4), but
+ * PACK state leaks between menu and world, making Mesa require more than
+ * the PBO holds. Reset PACK around the shim's call only, then restore. */
+static __typeof__(&glGetTexImage) real_glGetTexImage;
+void redirect_glGetTexImage(GLenum target, GLint level, GLenum format,
+                            GLenum type, GLvoid *pixels) {
+  typedef void (*getIntegerv_t)(unsigned int, int *);
+  typedef void (*pixelStorei_t)(unsigned int, int);
+  static getIntegerv_t mesaGetIntegerv = NULL;
+  static pixelStorei_t mesaPixelStorei = NULL;
+  static int resolved = 0;
+  int a = 4, rl = 0, sp = 0, sr = 0, ih = 0, si = 0, sw = 0, lsb = 0;
+  int sanitize = 0;
+  int dirty = 0;
+  if (real_glGetTexImage == NULL) {
+    real_glGetTexImage =
+        (__typeof__(&glGetTexImage))resolveMesaEntryPoint("glGetTexImage");
+  }
+  if (real_glGetTexImage == NULL) return;
+  if (!resolved) {
+    resolved = 1;
+    mesaGetIntegerv = (getIntegerv_t)resolveMesaEntryPoint("glGetIntegerv");
+    mesaPixelStorei = (pixelStorei_t)resolveMesaEntryPoint("glPixelStorei");
+  }
+  sanitize = (mesaGetIntegerv && mesaPixelStorei);
+  if (sanitize) {
+    mesaGetIntegerv(0x0D05, &a);
+    mesaGetIntegerv(0x0D02, &rl);
+    mesaGetIntegerv(0x0D04, &sp);
+    mesaGetIntegerv(0x0D03, &sr);
+    mesaGetIntegerv(0x806C, &ih);
+    mesaGetIntegerv(0x806B, &si);
+    mesaGetIntegerv(0x0D00, &sw);
+    mesaGetIntegerv(0x0D01, &lsb);
+  }
+  if (!sanitize) {
+    /* No silent fallback: without the reset a PACK leak fails every submit
+     * exactly like before, so say so once instead of failing quietly. */
+    static int warned = 0;
+    if (!warned) {
+      warned = 1;
+      logLine("GetTexImage sanitize off; PACK leaks will fail submits");
+    }
+  }
+  /* Skip the writes when PACK is already tight (the common menu case). */
+  dirty = sanitize && (a != 4 || rl || sp || sr || ih || si || sw || lsb);
+  if (dirty) {
+    mesaPixelStorei(0x0D05, 4);
+    mesaPixelStorei(0x0D02, 0);
+    mesaPixelStorei(0x0D04, 0);
+    mesaPixelStorei(0x0D03, 0);
+    mesaPixelStorei(0x806C, 0);
+    mesaPixelStorei(0x806B, 0);
+    mesaPixelStorei(0x0D00, 0);
+    mesaPixelStorei(0x0D01, 0);
+  }
+  VRGLFIX_NOTE_FIRST_CALL(glGetTexImage);
+  real_glGetTexImage(target, level, format, type, pixels);
+  if (dirty) {
+    mesaPixelStorei(0x0D05, a);
+    mesaPixelStorei(0x0D02, rl);
+    mesaPixelStorei(0x0D04, sp);
+    mesaPixelStorei(0x0D03, sr);
+    mesaPixelStorei(0x806C, ih);
+    mesaPixelStorei(0x806B, si);
+    mesaPixelStorei(0x0D00, sw);
+    mesaPixelStorei(0x0D01, lsb);
+  }
+}
+DYLD_INTERPOSE(redirect_glGetTexImage, glGetTexImage);
 VRGLFIX_FORWARD_VOID(glGetTexLevelParameteriv,
                      (GLenum target, GLint level, GLenum pname, GLint *params),
                      (target, level, pname, params));
