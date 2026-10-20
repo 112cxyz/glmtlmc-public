@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import plistlib
+import pwd
 import re
 import shutil
 import struct
@@ -455,21 +456,31 @@ def dequarantine(script_dir):
 
     Undoing a quarantine edits the extended attributes of every file it touches,
     so it is reported the same way as a write even though nothing was rewritten.
+    xattr fails silently on files it may not touch, so the count is taken again
+    afterwards: any library left quarantined is one Gatekeeper blocks at launch.
     """
     cleared = []
+    remaining = 0
     for folder in ("stack", "shaderpacks"):
         target = os.path.join(script_dir, folder)
         if not os.path.isdir(target):
             continue
-        cleared.append((folder, quarantined_count(target)))
+        before = quarantined_count(target)
         subprocess.run(
             ["xattr", "-dr", QUARANTINE_ATTR, target],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        after = quarantined_count(target)
+        cleared.append((folder, before - after))
+        remaining += after
     if not cleared:
         return
     line = PhaseLine("Clearing quarantine")
     for folder, count in cleared:
         line.report("cleared", folder + " (" + plural(count, "file") + ")")
+    if remaining:
+        line.fail(plural(remaining, "file") + " still quarantined — run again with "
+                  "sudo: sudo " + os.path.join(script_dir, "glmtlmc"))
+        sys.exit(1)
 
 
 def run_tool(command, timeout=None):
@@ -1012,6 +1023,12 @@ def refuse_duplicate_mods(line, instance_dir):
 
 def probe_report(line, script_dir, stack):
     prefix = resolve_mesa_prefix(script_dir)
+    # Every stack path lands in JvmArgs and WrapperCommand, which are split on
+    # spaces, so one space or backslash turns a path into two broken arguments.
+    if any(char.isspace() or char == "\\" for char in prefix):
+        raise PhaseError("glmtlmc requires a stack path without spaces or backslashes "
+                         "(current: " + prefix + ") — move the glmtlmc folder, "
+                         "e.g. to ~/glmtlmc, then run it again")
     egl_path = os.path.join(prefix, "lib", "libEGL.dylib")
     if not os.path.isfile(egl_path):
         raise PhaseError(egl_path + " not found (set GLMTLMC_MESA_PREFIX)")
@@ -1547,6 +1564,28 @@ def run_operation(phases):
     return 0
 
 
+def drop_sudo():
+    """Hand the run back to the user who typed sudo, once quarantine is cleared.
+
+    Clearing quarantine is the only step that may need root. Everything after it
+    writes into the user's Prism instance and the stack, and Prism, Minecraft and
+    a re-run of glmtlmc all need to own those files, so none of them can be root's.
+    """
+    if os.geteuid() != 0:
+        return
+    sudo_uid = os.environ.get("SUDO_UID")
+    if not sudo_uid:
+        print(RED + "Error: run glmtlmc from your own account with sudo, not as root"
+              + RESET)
+        sys.exit(1)
+    user = pwd.getpwuid(int(sudo_uid))
+    os.initgroups(user.pw_name, user.pw_gid)
+    os.setgid(user.pw_gid)
+    os.setuid(user.pw_uid)
+    os.environ.update({"HOME": user.pw_dir, "USER": user.pw_name,
+                       "LOGNAME": user.pw_name})
+
+
 def ensure_inside_project():
     """Signature-check the folder around the script, then work from inside it.
 
@@ -1581,7 +1620,12 @@ def ask_instance_location():
     except EOFError:
         print(RED + "Error: no instance location given" + RESET)
         sys.exit(1)
-    path = os.path.expanduser(strip_surrounding_quotes(raw.strip()))
+    path = strip_surrounding_quotes(raw.strip())
+    # A folder dragged into Terminal arrives shell-escaped ("Application\ Support"),
+    # so a path that is not there as written is tried again with the escapes undone.
+    if "\\" in path and not os.path.isdir(os.path.expanduser(path)):
+        path = re.sub(r"\\(.)", r"\1", path)
+    path = os.path.expanduser(path)
     if not os.path.isdir(path):
         print(RED + "Error: directory not found: " + path + RESET)
         sys.exit(1)
@@ -1615,6 +1659,8 @@ def ask_operation():
 
 def main():
     script_dir = ensure_inside_project()
+    dequarantine(script_dir)
+    drop_sudo()
     refuse_if_launcher_running()
     instance_dir = ask_instance_location()
     operation = ask_operation()
@@ -1624,7 +1670,6 @@ def main():
         phases = patch_vr_phases(instance_dir, script_dir)
     else:
         phases = patch_phases(instance_dir, script_dir)
-    dequarantine(script_dir)
     error_count = run_operation(phases)
     sys.exit(1 if error_count else 0)
 
