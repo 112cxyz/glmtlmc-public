@@ -102,7 +102,7 @@ Run glmtlmc with sudo. Browsers quarantine every file they download, and Gatekee
 1. Quit Prism Launcher completely.
 2. Open your terminal.
 3. Type 'sudo ' (with the space), drag the 'glmtlmc' file from the release folder into the terminal, then press enter and enter your password.
-4. When asked for the location of the instance, drag the instance folder into the terminal and press enter. Escaped spaces like 'Application\ Support' are fine.
+4. glmtlmc lists the Prism instances it finds, with their Minecraft version and whether they're already patched. Type the number of the one you want. If yours isn't listed, drag the instance folder into the terminal instead and press enter. Escaped spaces like 'Application\ Support' are fine.
 5. Choose an option and follow its instructions.
 
 The path to the GLMTLMC release folder itself must not contain spaces or backslashes. The launch settings glmtlmc writes into Prism are split on spaces, so a folder like 'Downloads/glmtlmc-public 2' would break them. glmtlmc stops and tells you if it finds one; move or rename the folder (e.g. to '~/glmtlmc') and run it again.
